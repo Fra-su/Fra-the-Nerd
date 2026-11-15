@@ -32,6 +32,12 @@ async function getDB() {
   }
 }
 
+// Another database on the same connection (e.g. "chatbot" for /talk votes)
+async function getNamedDB(name) {
+  await getDB();
+  return client.db(name);
+}
+
 // ─── Elo System ───────────────────────────────────────────────────────────────
 // ✏️ Everyone starts here, and Elo is clamped to [ELO_MIN, ELO_MAX].
 const ELO_START = 1000;
@@ -334,4 +340,4 @@ async function getPlayerRank(userId, scope) {
   }
 }
 
-module.exports = { recordGameElo, getPlayerStats, getLeaderboard, getPlayerRank, ELO_START };
+module.exports = { recordGameElo, getPlayerStats, getLeaderboard, getPlayerRank, ELO_START, getNamedDB };

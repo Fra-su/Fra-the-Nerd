@@ -126,6 +126,7 @@ client.once("ready", async () => {
         leaderboardCmd.toJSON(),
         coordCommand.coordData.toJSON(),
         talkCommand.talkData.toJSON(),
+        talkCommand.talkResultsData.toJSON(),
       ],
     });
     console.log("✅ Slash commands registered!");
@@ -213,6 +214,8 @@ client.on("interactionCreate", async (interaction) => {
       await coordCommand.executeSetupCoord(interaction);
     } else if (interaction.commandName === "talk") {
       await talkCommand.executeTalk(interaction);
+    } else if (interaction.commandName === "talkresults") {
+      await talkCommand.executeTalkResults(interaction);
     }
     return;
   }
@@ -237,6 +240,8 @@ client.on("interactionCreate", async (interaction) => {
       await mafiaCommand.handleMafiaInteraction(interaction);
     } else if (id === "coord_work" || id === "coord_finish") {
       await coordCommand.handleCoordInteraction(interaction);
+    } else if (id.startsWith("talkvote:")) {
+      await talkCommand.handleVote(interaction);
     }
   }
 });

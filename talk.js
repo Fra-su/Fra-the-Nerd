@@ -9,18 +9,32 @@
 //   @bot <text>                             (default model)
 //   @bot shakespeare: <text>                (pick a model)
 //
+// Every reply comes in two versions made two different ways (see AB below),
+// in random order, with "One is better" / "Two is better" buttons. Votes are
+// saved in MongoDB (database "chatbot", collection "feedback") and
+// /talkresults shows which way is winning.
+//
 // ✏️ Change the default model with DEFAULT_MODEL in .env / Railway variables.
 
-const { SlashCommandBuilder } = require("discord.js");
+const crypto = require("crypto");
+const {
+  SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags,
+} = require("discord.js");
 const models = require("./models");
+const stats = require("./stats");
 
 const MODELS = models.list();
 const DEFAULT_MODEL =
   (process.env.DEFAULT_MODEL && MODELS.includes(process.env.DEFAULT_MODEL) && process.env.DEFAULT_MODEL) ||
   (MODELS.includes("english") ? "english" : MODELS[0]);
 
+// ✏️ The two ways of replying compared in every message (names from models.METHODS)
+const AB = ["best", "plain"];
+const METHOD_NAMES = { best: "best of 5 + no repeats", plain: "plain (first try)" };
+
 const pretty = name => name.charAt(0).toUpperCase() + name.slice(1);
 
+// ─── Slash commands ──────────────────────────────────────────────────────────
 const talkData = new SlashCommandBuilder()
   .setName("talk")
   .setDescription("Talk to an AI trained from scratch")
@@ -34,9 +48,14 @@ const talkData = new SlashCommandBuilder()
       .addChoices(...MODELS.slice(0, 25).map(n => ({ name: pretty(n), value: n })))
   );
 
-function getReply(model, message) {
+const talkResultsData = new SlashCommandBuilder()
+  .setName("talkresults")
+  .setDescription("See which way of replying people prefer");
+
+// ─── Replies ─────────────────────────────────────────────────────────────────
+function getReply(model, message, method) {
   try {
-    return models.reply(model, message);
+    return models.reply(model, message, method);
   } catch (err) {
     console.error(`⚠️ AI model "${model}" error:`, err.message);
     return null;
@@ -48,15 +67,65 @@ const BROKEN = "That AI model couldn't load (is the model/ folder there?).";
 // Keep replies from pinging @everyone / roles / users
 const SAFE = { allowedMentions: { parse: [] } };
 
+// Two replies made two different ways, shown in random order so nobody can tell which is which.
+function makePair(model, text) {
+  const methods = Math.random() < 0.5 ? [AB[0], AB[1]] : [AB[1], AB[0]];
+  const replies = methods.map(m => getReply(model, text, m));
+  return { methods, replies, ok: replies.every(Boolean) };
+}
+
+function formatPair(replies) {
+  return `**1.** ${replies[0]}\n**2.** ${replies[1]}`;
+}
+
+function voteRow(id, counts = [0, 0]) {
+  const label = (text, n) => (n ? `${text} (${n})` : text);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`talkvote:${id}:0`).setLabel(label("One is better", counts[0])).setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`talkvote:${id}:1`).setLabel(label("Two is better", counts[1])).setStyle(ButtonStyle.Secondary),
+  );
+}
+
+// ─── Feedback storage (MongoDB, with an in-memory fallback) ──────────────────
+const memory = new Map(); // id -> doc, used only if MongoDB can't be reached
+
+async function feedback() {
+  return (await stats.getNamedDB("chatbot")).collection("feedback");
+}
+
+async function saveFeedback(doc) {
+  try {
+    await (await feedback()).insertOne(doc);
+  } catch (err) {
+    console.warn("⚠️ Vote not saved to MongoDB (kept in memory):", err.message);
+    memory.set(doc._id, doc);
+  }
+}
+
+async function newFeedback({ model, prompt, methods, replies, guildId, channelId, userId }) {
+  const doc = {
+    _id: crypto.randomBytes(8).toString("hex"),
+    createdAt: new Date(),
+    model, prompt, guildId, channelId, askedBy: userId,
+    versions: methods.map((method, i) => ({ method, text: replies[i] })),
+    votes: {}, // userId -> 0 or 1 (which version they picked)
+  };
+  await saveFeedback(doc);
+  return doc._id;
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────────
 async function executeTalk(interaction) {
   const message = interaction.options.getString("message");
   const model = interaction.options.getString("model") || DEFAULT_MODEL;
   await interaction.deferReply();
-  const reply = getReply(model, message);
-  return interaction.editReply({
-    content: reply ? `> ${message}\n${reply}` : BROKEN,
-    ...SAFE,
+  const pair = makePair(model, message);
+  if (!pair.ok) return interaction.editReply({ content: BROKEN, ...SAFE });
+  const id = await newFeedback({
+    model, prompt: message, ...pair,
+    guildId: interaction.guildId, channelId: interaction.channelId, userId: interaction.user?.id,
   });
+  return interaction.editReply({ content: `> ${message}\n${formatPair(pair.replies)}`, components: [voteRow(id)], ...SAFE });
 }
 
 // "english: hello" -> { model: "english", text: "hello" }
@@ -75,8 +144,70 @@ async function handleMention(message, botUser) {
     return message.reply({ content: `Say something after the mention! Pick an AI with ${names}`, ...SAFE });
   }
   await message.channel.sendTyping().catch(() => {});
-  const reply = getReply(model, text);
-  return message.reply({ content: reply || BROKEN, ...SAFE });
+  const pair = makePair(model, text);
+  if (!pair.ok) return message.reply({ content: BROKEN, ...SAFE });
+  const id = await newFeedback({
+    model, prompt: text, ...pair,
+    guildId: message.guildId, channelId: message.channelId, userId: message.author.id,
+  });
+  return message.reply({ content: formatPair(pair.replies), components: [voteRow(id)], ...SAFE });
 }
 
-module.exports = { talkData, executeTalk, handleMention, getReply, pickModel, MODELS, DEFAULT_MODEL };
+// A "One is better" / "Two is better" click. Everyone gets one vote per message and can change it.
+async function handleVote(interaction) {
+  const [, id, pick] = interaction.customId.split(":");
+  const choice = Number(pick);
+  const userId = interaction.user.id;
+  let doc = null;
+  try {
+    doc = await (await feedback()).findOneAndUpdate(
+      { _id: id }, { $set: { [`votes.${userId}`]: choice } }, { returnDocument: "after" });
+  } catch (err) {
+    console.warn("⚠️ Vote not saved to MongoDB:", err.message);
+  }
+  if (!doc && memory.has(id)) {
+    doc = memory.get(id);
+    doc.votes[userId] = choice;
+  }
+  if (!doc) {
+    return interaction.reply({ content: "Sorry, I couldn't record that vote.", flags: MessageFlags.Ephemeral });
+  }
+  const counts = [0, 0];
+  for (const v of Object.values(doc.votes || {})) counts[v]++;
+  return interaction.update({ components: [voteRow(id, counts)] });
+}
+
+// /talkresults: wins per way of replying, per model
+async function executeTalkResults(interaction) {
+  await interaction.deferReply();
+  let docs = [];
+  try {
+    docs = await (await feedback()).find({}, { projection: { model: 1, versions: 1, votes: 1 } }).toArray();
+  } catch (err) {
+    docs = [...memory.values()];
+  }
+  const tally = {}; // model -> method -> wins
+  let votes = 0;
+  for (const d of docs) {
+    for (const v of Object.values(d.votes || {})) {
+      const method = d.versions?.[v]?.method;
+      if (!method) continue;
+      tally[d.model] ??= {};
+      tally[d.model][method] = (tally[d.model][method] || 0) + 1;
+      votes++;
+    }
+  }
+  if (!votes) return interaction.editReply("No votes yet! Use /talk and click the buttons.");
+  const lines = Object.entries(tally).map(([model, t]) => {
+    const total = Object.values(t).reduce((a, b) => a + b, 0);
+    const parts = Object.entries(t).sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => `${METHOD_NAMES[m] || m}: ${n} (${Math.round((100 * n) / total)}%)`);
+    return `**${pretty(model)}**: ${parts.join(" vs ")}`;
+  });
+  return interaction.editReply(`Votes so far (${votes}):\n${lines.join("\n")}`);
+}
+
+module.exports = {
+  talkData, talkResultsData, executeTalk, executeTalkResults, handleMention, handleVote,
+  getReply, pickModel, makePair, MODELS, DEFAULT_MODEL,
+};

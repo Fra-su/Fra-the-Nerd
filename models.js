@@ -196,32 +196,63 @@ function sample(logits, temperature, topK) {
   return logits.indexOf(mx);
 }
 
-function generate(name, prompt, { maxNew = 60, temperature = 0.8, topK = 40 } = {}) {
+// log of the probability the model gives `token` (using the raw scores, before any tweaks)
+function logProb(logits, token) {
+  let mx = -Infinity;
+  for (let i = 0; i < logits.length; i++) if (logits[i] > mx) mx = logits[i];
+  let z = 0;
+  for (let i = 0; i < logits.length; i++) z += Math.exp(logits[i] - mx);
+  return logits[token] - mx - Math.log(z);
+}
+
+// One candidate reply. Returns { text, score } where score is the model's average
+// confidence in the words it wrote (higher = less likely to be gibberish).
+// repPenalty > 1 makes words it already used in this reply less likely (no "a bit salty, a bit salty").
+function generate(name, prompt, { maxNew = 60, temperature = 0.8, topK = 40, repPenalty = 1.0 } = {}) {
   const m = load(name);
   const ids = encode(name, prompt).slice(-(m.T - maxNew));
   const st = newState(m);
   let logits = null;
   for (const t of ids) logits = feed(m, st, t);
   const out = [];
+  let total = 0;
   while (out.length < maxNew && st.pos < m.T) {
-    const next = sample(logits, temperature, topK);
+    let scores = logits;
+    if (repPenalty !== 1.0 && out.length) {
+      scores = Float64Array.from(logits);
+      for (const t of new Set(out)) {
+        if (m.newlineIds.has(t)) continue;
+        scores[t] = scores[t] > 0 ? scores[t] / repPenalty : scores[t] * repPenalty;
+      }
+    }
+    const next = sample(scores, temperature, topK);
+    total += logProb(logits, next);
     out.push(next);
     if (m.newlineIds.has(next)) break;
     logits = feed(m, st, next);
   }
-  return decode(name, out).split("\n")[0].trim();
+  return { text: decode(name, out).split("\n")[0].trim(), score: out.length ? total / out.length : -Infinity };
 }
 
 // ─── Public ──────────────────────────────────────────────────────────────────
-// One chat reply from the model called `name`.
-function reply(name, message, opts = {}) {
+// Ways to reply. ✏️ Add more here to try them in the live A/B votes.
+const METHODS = {
+  plain: { candidates: 1, repPenalty: 1.0 },          // the original: say the first thing generated
+  best: { candidates: 5, repPenalty: 1.3 },           // write 5, keep the most confident; no repeats
+};
+
+// One chat reply from the model called `name`, using one of METHODS.
+function reply(name, message, method = "best") {
   const m = load(name);
+  const { candidates, repPenalty } = METHODS[method] || METHODS.best;
   const msg = message.split(/\s+/).filter(Boolean).join(" ").slice(0, m.info.max_line * 2);
-  for (let i = 0; i < 4; i++) {           // retry if it comes out empty
-    const out = generate(name, `User: ${msg}\nBot:`, opts);
-    if (out) return out;
+  const prompt = `User: ${msg}\nBot:`;
+  let best = null;
+  for (let i = 0; i < candidates || (!best?.text && i < candidates + 3); i++) {   // extra tries if all empty
+    const c = generate(name, prompt, { repPenalty });
+    if (c.text && (!best || !best.text || c.score > best.score)) best = c;
   }
-  return "...";
+  return best?.text || "...";
 }
 
 function about(name) {
@@ -229,4 +260,4 @@ function about(name) {
   return { params: m.info.layout.reduce((n, l) => n + l.shape.reduce((a, b) => a * b, 1), 0), steps: m.info.steps };
 }
 
-module.exports = { list, reply, about, encode, decode, _test: { load, newState, feed } };
+module.exports = { list, reply, about, encode, decode, METHODS, _test: { load, newState, feed, generate } };
