@@ -1,29 +1,40 @@
-// ─── Shakespeare AI: the language model, running inside the bot ─────────────
-// A small GPT (transformer) trained from scratch in Python:
+// ─── AI chat models, running inside the bot ─────────────────────────────────
+// Small GPT language models trained from scratch in Python:
 //   Small Programming Projects/ReenforcementLearning AI/llm.py
-// This file is the same model's forward pass rewritten in plain JavaScript,
-// so the bot needs no Python and no separate server. Only replies are made
-// here; training still happens in llm.py.
+// This file is their forward pass rewritten in plain JavaScript, so the bot
+// needs no Python and no separate server. Only replies are made here;
+// training still happens in llm.py.
 //
-// To update the model after training more:   python llm.py export
-// (writes model/shakespeare.json + model/shakespeare.bin into this folder)
+// Every model is a pair of files in model/:  <name>.json + <name>.bin
+// Add or update one with:   python llm.py export --name <name>
+// The bot picks up every model it finds there when it starts.
 
 const fs = require("fs");
 const path = require("path");
 
 const MODEL_DIR = path.join(__dirname, "model");
+const loaded = new Map(); // name -> model, loaded on first use
+
+// ─── Which models exist ──────────────────────────────────────────────────────
+function list() {
+  if (!fs.existsSync(MODEL_DIR)) return [];
+  return fs.readdirSync(MODEL_DIR)
+    .filter(f => f.endsWith(".json") && fs.existsSync(path.join(MODEL_DIR, f.replace(/\.json$/, ".bin"))))
+    .map(f => f.replace(/\.json$/, ""))
+    .sort();
+}
 
 // ─── Load ────────────────────────────────────────────────────────────────────
-let M = null; // loaded lazily on first use
-
-function load() {
-  const info = JSON.parse(fs.readFileSync(path.join(MODEL_DIR, "shakespeare.json"), "utf8"));
-  const buf = fs.readFileSync(path.join(MODEL_DIR, "shakespeare.bin"));
+function load(name) {
+  if (loaded.has(name)) return loaded.get(name);
+  if (!list().includes(name)) throw new Error(`No model called "${name}" in model/`);
+  const info = JSON.parse(fs.readFileSync(path.join(MODEL_DIR, `${name}.json`), "utf8"));
+  const buf = fs.readFileSync(path.join(MODEL_DIR, `${name}.bin`));
   const all = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
   const p = {};
-  for (const { name, shape, offset } of info.layout) {
+  for (const { name: k, shape, offset } of info.layout) {
     const size = shape.reduce((a, b) => a * b, 1);
-    p[name] = all.subarray(offset, offset + size);
+    p[k] = all.subarray(offset, offset + size);
   }
   const { vocab_size: V, d, n_layer: L, n_head: H, context: T } = info.cfg;
 
@@ -33,12 +44,9 @@ function load() {
   const ranks = new Map(info.tokenizer.merges.map(([a, b], i) => [a + "\u0000" + b, i]));
   const newlineIds = new Set(vocab.map((t, i) => (t.includes("\n") ? i : -1)).filter(i => i >= 0));
 
-  M = { info, p, V, d, L, H, T, hd: d / H, vocab, stoi, ranks, newlineIds, cache: new Map() };
-  return M;
-}
-
-function model() {
-  return M || load();
+  const m = { name, info, p, V, d, L, H, T, hd: d / H, vocab, stoi, ranks, newlineIds, cache: new Map() };
+  loaded.set(name, m);
+  return m;
 }
 
 // ─── Tokenizer (byte-pair encoding, same rules as llm.py) ────────────────────
@@ -71,15 +79,15 @@ function encodeWord(m, w) {
   return ids;
 }
 
-function encode(text) {
-  const m = model();
+function encode(name, text) {
+  const m = load(name);
   const out = [];
   for (const w of text.match(/\n|[^\S\n]*\S+|[^\S\n]+/g) || []) out.push(...encodeWord(m, w));
   return out;
 }
 
-function decode(ids) {
-  const m = model();
+function decode(name, ids) {
+  const m = load(name);
   return ids.map(i => m.vocab[i]).join("");
 }
 
@@ -188,9 +196,9 @@ function sample(logits, temperature, topK) {
   return logits.indexOf(mx);
 }
 
-function generate(prompt, { maxNew = 60, temperature = 0.8, topK = 40 } = {}) {
-  const m = model();
-  const ids = encode(prompt).slice(-(m.T - maxNew));
+function generate(name, prompt, { maxNew = 60, temperature = 0.8, topK = 40 } = {}) {
+  const m = load(name);
+  const ids = encode(name, prompt).slice(-(m.T - maxNew));
   const st = newState(m);
   let logits = null;
   for (const t of ids) logits = feed(m, st, t);
@@ -201,23 +209,24 @@ function generate(prompt, { maxNew = 60, temperature = 0.8, topK = 40 } = {}) {
     if (m.newlineIds.has(next)) break;
     logits = feed(m, st, next);
   }
-  return decode(out).split("\n")[0].trim();
+  return decode(name, out).split("\n")[0].trim();
 }
 
-// ─── Public: one chat reply ──────────────────────────────────────────────────
-function reply(message, opts = {}) {
-  const m = model();
+// ─── Public ──────────────────────────────────────────────────────────────────
+// One chat reply from the model called `name`.
+function reply(name, message, opts = {}) {
+  const m = load(name);
   const msg = message.split(/\s+/).filter(Boolean).join(" ").slice(0, m.info.max_line * 2);
   for (let i = 0; i < 4; i++) {           // retry if it comes out empty
-    const out = generate(`User: ${msg}\nBot:`, opts);
+    const out = generate(name, `User: ${msg}\nBot:`, opts);
     if (out) return out;
   }
   return "...";
 }
 
-function about() {
-  const m = model();
+function about(name) {
+  const m = load(name);
   return { params: m.info.layout.reduce((n, l) => n + l.shape.reduce((a, b) => a * b, 1), 0), steps: m.info.steps };
 }
 
-module.exports = { reply, about, encode, decode, _test: { model, newState, feed } };
+module.exports = { list, reply, about, encode, decode, _test: { load, newState, feed } };

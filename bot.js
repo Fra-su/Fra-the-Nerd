@@ -246,7 +246,21 @@ client.on("messageCreate", (message) => {
   talkCommand.handleMention(message, client.user).catch(err => console.error("Talk error:", err));
 });
 
-client.login(process.env.DISCORD_BOT_TOKEN);
+// Clean up common copy-paste mistakes (spaces, quotes) and log a safe summary
+// of the token (never the token itself) so a bad setup is easy to spot in logs.
+const rawToken = process.env.DISCORD_BOT_TOKEN;
+const token = (rawToken || "").trim().replace(/^["']|["']$/g, "").trim();
+if (!rawToken) {
+  console.error("❌ DISCORD_BOT_TOKEN is not set. Add it to .env (on your PC) or the host's variables (e.g. Railway).");
+} else {
+  const notes = [];
+  if (token !== rawToken) notes.push("removed spaces/quotes around it");
+  if (/\s/.test(token)) notes.push("STILL CONTAINS SPACES - re-paste it");
+  console.log(`🔑 Token found: ${token.length} characters, ${token.split(".").length} parts (should be 3)` +
+    (notes.length ? ` — ${notes.join("; ")}` : ""));
+}
+
+client.login(token);
 
 // ─── Express Webhook Server ──────────────────────────────────────────────────
 const app = express();
