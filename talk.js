@@ -4,10 +4,10 @@
 // else needs to be running. Every model in model/ shows up automatically.
 //
 // Ways to talk in Discord:
-//   /talk message:<text>                    (uses the default model)
-//   /talk message:<text> model:English      (pick a model)
+//   /talk message:<text>                    (uses the default model: English)
+//   /talk message:<text> model:Shakespeare  (pick a model)
 //   @bot <text>                             (default model)
-//   @bot english: <text>                    (pick a model)
+//   @bot shakespeare: <text>                (pick a model)
 //
 // ✏️ Change the default model with DEFAULT_MODEL in .env / Railway variables.
 
@@ -17,11 +17,8 @@ const models = require("./models");
 const MODELS = models.list();
 const DEFAULT_MODEL =
   (process.env.DEFAULT_MODEL && MODELS.includes(process.env.DEFAULT_MODEL) && process.env.DEFAULT_MODEL) ||
-  (MODELS.includes("shakespeare") ? "shakespeare" : MODELS[0]);
+  (MODELS.includes("english") ? "english" : MODELS[0]);
 
-// ✏️ The emoji shown in front of each model's replies
-const EMOJI = { shakespeare: "🎭", english: "💬" };
-const emoji = name => EMOJI[name] || "🤖";
 const pretty = name => name.charAt(0).toUpperCase() + name.slice(1);
 
 const talkData = new SlashCommandBuilder()
@@ -46,7 +43,7 @@ function getReply(model, message) {
   }
 }
 
-const BROKEN = "😵 That AI model couldn't load (is the model/ folder there?).";
+const BROKEN = "That AI model couldn't load (is the model/ folder there?).";
 
 // Keep replies from pinging @everyone / roles / users
 const SAFE = { allowedMentions: { parse: [] } };
@@ -57,7 +54,7 @@ async function executeTalk(interaction) {
   await interaction.deferReply();
   const reply = getReply(model, message);
   return interaction.editReply({
-    content: reply ? `> ${message}\n${emoji(model)} **${pretty(model)}:** ${reply}` : BROKEN,
+    content: reply ? `> ${message}\n${reply}` : BROKEN,
     ...SAFE,
   });
 }
@@ -75,11 +72,11 @@ async function handleMention(message, botUser) {
   const { model, text } = pickModel(message.content.replace(/<@!?\d+>/g, "").trim());
   if (!text) {
     const names = MODELS.map(n => `\`${n}:\``).join(" or ");
-    return message.reply({ content: `${emoji(model)} Say something after the mention! Pick an AI with ${names}`, ...SAFE });
+    return message.reply({ content: `Say something after the mention! Pick an AI with ${names}`, ...SAFE });
   }
   await message.channel.sendTyping().catch(() => {});
   const reply = getReply(model, text);
-  return message.reply({ content: reply ? `${emoji(model)} ${reply}` : BROKEN, ...SAFE });
+  return message.reply({ content: reply || BROKEN, ...SAFE });
 }
 
 module.exports = { talkData, executeTalk, handleMention, getReply, pickModel, MODELS, DEFAULT_MODEL };
