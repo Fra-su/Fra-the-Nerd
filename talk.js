@@ -78,11 +78,15 @@ function formatPair(replies) {
   return `**1.** ${replies[0]}\n**2.** ${replies[1]}`;
 }
 
-function voteRow(id, counts = [0, 0]) {
+// Vote choices: 0 = version 1 better, 1 = version 2 better, 2 = both fine, 3 = neither good
+const CHOICES = ["One is better", "Two is better", "Both are fine", "Neither is good"];
+const BOTH = 2, NEITHER = 3;
+
+function voteRow(id, counts = [0, 0, 0, 0]) {
   const label = (text, n) => (n ? `${text} (${n})` : text);
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`talkvote:${id}:0`).setLabel(label("One is better", counts[0])).setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`talkvote:${id}:1`).setLabel(label("Two is better", counts[1])).setStyle(ButtonStyle.Secondary),
+    CHOICES.map((text, i) =>
+      new ButtonBuilder().setCustomId(`talkvote:${id}:${i}`).setLabel(label(text, counts[i])).setStyle(ButtonStyle.Secondary))
   );
 }
 
@@ -108,7 +112,7 @@ async function newFeedback({ model, prompt, methods, replies, guildId, channelId
     createdAt: new Date(),
     model, prompt, guildId, channelId, askedBy: userId,
     versions: methods.map((method, i) => ({ method, text: replies[i] })),
-    votes: {}, // userId -> 0 or 1 (which version they picked)
+    votes: {}, // userId -> 0 (version 1 better), 1 (version 2 better), 2 (both fine), 3 (neither good)
   };
   await saveFeedback(doc);
   return doc._id;
@@ -153,10 +157,13 @@ async function handleMention(message, botUser) {
   return message.reply({ content: formatPair(pair.replies), components: [voteRow(id)], ...SAFE });
 }
 
-// A "One is better" / "Two is better" click. Everyone gets one vote per message and can change it.
+// A vote button click. Everyone gets one vote per message and can change it.
 async function handleVote(interaction) {
   const [, id, pick] = interaction.customId.split(":");
   const choice = Number(pick);
+  if (!Number.isInteger(choice) || choice < 0 || choice >= CHOICES.length) {
+    return interaction.reply({ content: "Unknown vote.", flags: MessageFlags.Ephemeral });
+  }
   const userId = interaction.user.id;
   let doc = null;
   try {
@@ -172,8 +179,8 @@ async function handleVote(interaction) {
   if (!doc) {
     return interaction.reply({ content: "Sorry, I couldn't record that vote.", flags: MessageFlags.Ephemeral });
   }
-  const counts = [0, 0];
-  for (const v of Object.values(doc.votes || {})) counts[v]++;
+  const counts = CHOICES.map(() => 0);
+  for (const v of Object.values(doc.votes || {})) if (counts[v] !== undefined) counts[v]++;
   return interaction.update({ components: [voteRow(id, counts)] });
 }
 
@@ -186,23 +193,28 @@ async function executeTalkResults(interaction) {
   } catch (err) {
     docs = [...memory.values()];
   }
-  const tally = {}; // model -> method -> wins
+  const tally = {}; // model -> { wins: { method -> n }, both: n, neither: n }
   let votes = 0;
   for (const d of docs) {
     for (const v of Object.values(d.votes || {})) {
-      const method = d.versions?.[v]?.method;
-      if (!method) continue;
-      tally[d.model] ??= {};
-      tally[d.model][method] = (tally[d.model][method] || 0) + 1;
+      const t = (tally[d.model] ??= { wins: {}, both: 0, neither: 0 });
+      if (v === BOTH) t.both++;
+      else if (v === NEITHER) t.neither++;
+      else {
+        const method = d.versions?.[v]?.method;
+        if (!method) continue;
+        t.wins[method] = (t.wins[method] || 0) + 1;
+      }
       votes++;
     }
   }
   if (!votes) return interaction.editReply("No votes yet! Use /talk and click the buttons.");
   const lines = Object.entries(tally).map(([model, t]) => {
-    const total = Object.values(t).reduce((a, b) => a + b, 0);
-    const parts = Object.entries(t).sort((a, b) => b[1] - a[1])
-      .map(([m, n]) => `${METHOD_NAMES[m] || m}: ${n} (${Math.round((100 * n) / total)}%)`);
-    return `**${pretty(model)}**: ${parts.join(" vs ")}`;
+    const picked = Object.values(t.wins).reduce((a, b) => a + b, 0);
+    const parts = Object.entries(t.wins).sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => `${METHOD_NAMES[m] || m}: ${n} (${Math.round((100 * n) / picked)}%)`);
+    const head = parts.length ? parts.join(" vs ") : "no picks yet";
+    return `**${pretty(model)}**: ${head} | both fine: ${t.both} | neither good: ${t.neither}`;
   });
   return interaction.editReply(`Votes so far (${votes}):\n${lines.join("\n")}`);
 }
